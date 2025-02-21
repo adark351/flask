@@ -5,7 +5,7 @@ pipeline {
         DOCKER_REGISTRY = 'dark619' // Your Docker Hub username
         APP_NAME = 'flask'   // Name of your Docker image
         IMAGE_TAG = "${env.BUILD_ID}" // Use Jenkins build ID as the image tag
-        KUBE_CONFIG = credentials('kubeconfig') // Jenkins credential for kubeconfig
+        KUBE_CONFIG = credentials('con') // Jenkins credential for kubeconfig
         GIT_REPO = 'https://github.com/adark351/flask.git' // Your GitHub repository
     }
 
