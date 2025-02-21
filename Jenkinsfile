@@ -17,19 +17,16 @@ pipeline {
             }
         }
 
-        // Stage 2: Install kubectl if not already installed
-        stage('Install kubectl') {
-       
-        // Stage 3: Build the Docker image
+        // Stage 2: Build the Docker image
         stage('Build Docker Image') {
             steps {
                 script {
-                     sh "docker build -t ${DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG} ."
+                    sh "docker build -t ${DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG} ."
                 }
             }
         }
 
-        // Stage 4: Push the Docker image to Docker Hub
+        // Stage 3: Push the Docker image to Docker Hub
         stage('Push Docker Image') {
             steps {
                 script {
@@ -40,7 +37,7 @@ pipeline {
             }
         }
 
-        // Stage 5: Deploy to Kubernetes
+        // Stage 4: Deploy to Kubernetes
         stage('Deploy to Kubernetes') {
             steps {
                 script {
@@ -50,7 +47,7 @@ pipeline {
                     """
 
                     // Apply the Kubernetes deployment and service
-                    withKubeConfig([credentialsId: 'kubeconfig', serverUrl: '']) {
+                    withKubeConfig([credentialsId: KUBE_CONFIG]) {
                         sh "kubectl apply -f kubernetes/deployment.yaml --validate=false"
                         sh "kubectl apply -f kubernetes/service.yaml"
                     }
