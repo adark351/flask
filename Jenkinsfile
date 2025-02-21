@@ -19,20 +19,7 @@ pipeline {
 
         // Stage 2: Install kubectl if not already installed
         stage('Install kubectl') {
-            steps {
-                sh '''
-                if ! command -v kubectl &> /dev/null; then
-                    echo "kubectl not found. Installing..."
-                    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-                    chmod +x kubectl
-                    sudo mv kubectl /usr/local/bin/
-                else
-                    echo "kubectl is already installed."
-                fi
-                '''
-            }
-        }
-
+       
         // Stage 3: Build the Docker image
         stage('Build Docker Image') {
             steps {
