@@ -46,8 +46,11 @@ pipeline {
                         sed -i 's|${DOCKER_REGISTRY}/${APP_NAME}:latest|${DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG}|g' kubernetes/deployment.yaml
                     """
 
+                    // Debugging: Print the credential ID being used
+                    echo "Using kubeconfig with ID: con"
+
                     // Apply the Kubernetes deployment and service
-                    withKubeConfig([credentialsId: KUBE_CONFIG]) {
+                    withKubeConfig([credentialsId: 'con']) {
                         sh "kubectl apply -f kubernetes/deployment.yaml --validate=false"
                         sh "kubectl apply -f kubernetes/service.yaml"
                     }
