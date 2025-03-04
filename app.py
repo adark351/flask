@@ -125,7 +125,7 @@ def home():
             <a href="index.html">
                 <img src="static/images/PC.png" alt="AutoPC">
             </a>
-            <a href="./build">Start Your Creation</a>
+            <a href="./build">Start Your Creation modiy</a>
             <a href="https://pc-builder.net/knowledge-base/">Guides and Resources</a>
         </div>
     </nav>
