@@ -1,0 +1,113 @@
+---
+- hosts: jenkins
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Java 17 (required by Jenkins)
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Download Jenkins GPG key
+      get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: '0644'
+
+    - name: Add Jenkins repository
+      copy:
+        content: |
+          deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+        dest: /etc/apt/sources.list.d/jenkins.list
+
+    - name: Update apt cache after adding Jenkins repository
+      apt:
+        update_cache: yes
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Install Docker (to run containers)
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Add Jenkins user to the Docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Change permissions for Docker socket
+      shell: chmod 666 /var/run/docker.sock
+
+    - name: Start and enable Jenkins service
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Wait for Jenkins to start (port 8080)
+      wait_for:
+        port: 8080
+        delay: 10
+        timeout: 300
+
+    - name: Retrieve initial Jenkins password
+      command: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_password
+      changed_when: false
+
+    - name: Display initial Jenkins password
+      debug:
+        msg: "Initial Jenkins password: {{ jenkins_password.stdout }}"
+
+    - name: Copy kubeconfig from master node
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/kubeconfig
+        flat: yes
+      delegate_to: "{{ groups['master'][0] }}"
+      vars:
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: /home/dark/ka.pem
+        ansible_become: true
+
+    - name: Create .kube directory for Jenkins user
+      file:
+        path: /var/lib/jenkins/.kube
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Move kubeconfig to Jenkins user's .kube directory
+      copy:
+        src: /tmp/kubeconfig
+        dest: /var/lib/jenkins/.kube/config
+        owner: jenkins
+        group: jenkins
+        mode: '0600'
+
+    - name: Ensure Jenkins has permissions to use kubeconfig
+      shell: chown jenkins:jenkins /var/lib/jenkins/.kube/config
+
+    - name: Install kubectl if not already installed
+      shell: |
+        if ! command -v kubectl &> /dev/null; then
+            echo "kubectl not found. Installing..."
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            mv kubectl /usr/local/bin/
+        else
+            echo "kubectl is already installed."
+        fi
+      args:
+        executable: /bin/bash
+

@@ -1,0 +1,283 @@
+---
+- name: Configure Kubernetes 1.28 cluster on AWS
+  hosts: kubernetes
+  become: yes
+  tasks:
+    - name: Wait for SSH connection
+      wait_for_connection:
+        timeout: 600
+
+    - name: Install prerequisite packages
+      apt:
+        name: [apt-transport-https, ca-certificates, curl, gpg]
+        state: present
+        update_cache: yes
+      retries: 3
+      delay: 10
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: 0755
+
+    - name: Add Kubernetes GPG key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      register: gpg_result
+      retries: 3
+      delay: 10
+      until: gpg_result is not failed
+
+    - name: Add Kubernetes repository
+      apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /'
+        state: present
+        filename: kubernetes
+        update_cache: yes
+
+    - name: Debug - List available Kubernetes versions
+      shell: apt-cache madison kubeadm | grep 1.28
+      register: available_versions
+      ignore_errors: yes
+
+    - name: Show available versions
+      debug:
+        var: available_versions.stdout_lines
+
+    - name: Install Kubernetes components
+      apt:
+        name: 
+          - kubelet=1.28.0-1.1
+          - kubeadm=1.28.0-1.1
+          - kubectl=1.28.0-1.1
+        state: present
+      retries: 3
+      delay: 10
+
+    - name: Hold Kubernetes versions
+      shell: apt-mark hold kubelet kubeadm kubectl
+
+    - name: Disable swap
+      block:
+        - name: Disable swap
+          command: swapoff -a
+          
+        - name: Remove swap from fstab
+          replace:
+            path: /etc/fstab
+            regexp: '^([^#].*?\sswap\s+.*)$'
+            replace: '# \1'
+            
+        - name: Verify swap is disabled
+          shell: swapon --show
+          register: swap_status
+          failed_when: swap_status.stdout != ""
+
+    - name: Set hostname
+      hostname:
+        name: "{{ 'k8s-master' if 'master' in group_names else 'k8s-worker-' + inventory_hostname.split('.')[-1] }}"
+
+    - name: Ensure kernel modules are loaded
+      block:
+        - name: Load kernel modules
+          modprobe:
+            name: "{{ item }}"
+            state: present
+          loop:
+            - br_netfilter
+            - overlay
+
+        - name: Add kernel modules to load at boot
+          copy:
+            content: |
+              br_netfilter
+              overlay
+            dest: /etc/modules-load.d/k8s.conf
+            mode: 0644
+
+    - name: Configure sysctl parameters
+      block:
+        - name: Set sysctl parameters
+          sysctl:
+            name: "{{ item.key }}"
+            value: "{{ item.value }}"
+            state: present
+            reload: yes
+            sysctl_file: /etc/sysctl.d/k8s.conf
+          loop:
+            - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+            - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+            - { key: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: Install and configure containerd
+      block:
+        - name: Install containerd
+          apt:
+            name: containerd
+            state: present
+          retries: 3
+          delay: 10
+        
+        - name: Create containerd config directory
+          file:
+            path: /etc/containerd
+            state: directory
+            mode: 0755
+        
+        - name: Configure containerd
+          copy:
+            content: |
+              version = 2
+              [plugins."io.containerd.grpc.v1.cri"]
+                sandbox_image = "registry.k8s.io/pause:3.8"
+                [plugins."io.containerd.grpc.v1.cri".containerd]
+                  discard_unpacked_layers = true
+                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                    runtime_type = "io.containerd.runc.v2"
+                    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                      SystemdCgroup = true
+            dest: /etc/containerd/config.toml
+            mode: 0644
+          notify: Restart containerd
+
+        - name: Ensure containerd is running
+          systemd:
+            name: containerd
+            state: started
+            enabled: yes
+          
+    - name: Enable kubelet service
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+
+- name: Initialize Kubernetes master
+  hosts: master
+  become: yes
+  tasks:
+    - name: Initialize cluster
+      shell: |
+        kubeadm init \
+          --apiserver-advertise-address={{ ansible_default_ipv4.address }} \
+          --apiserver-bind-port=6443 \
+          --pod-network-cidr=192.168.0.0/16 \
+          --cri-socket unix:///run/containerd/containerd.sock \
+          --upload-certs
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+
+    - name: Display kubeadm init output
+      debug:
+        var: kubeadm_init.stdout_lines
+      when: kubeadm_init.changed
+
+    - name: Create .kube directory
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0750'
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+    - name: Wait for all control plane pods to be ready
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl wait --for=condition=Ready pods -l tier=control-plane -n kube-system --timeout=300s
+      register: control_plane_status
+      retries: 10
+      delay: 30
+      until: control_plane_status is not failed
+
+    - name: Verify core components
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl get pods -n kube-system
+      register: core_components
+      
+    - name: Display core components status
+      debug:
+        var: core_components.stdout_lines
+
+    - name: Wait for API server to be fully ready
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl get --raw='/healthz'
+      register: api_health
+      until: api_health.rc == 0 and api_health.stdout == "ok"
+      retries: 30
+      delay: 10
+
+    - name: Apply Calico network plugin
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.1/manifests/calico.yaml
+      register: calico_result
+
+    - name: Generate worker join command
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubeadm token create --print-join-command
+      register: join_command
+      retries: 5
+      delay: 30
+      until: join_command is not failed
+
+    - name: Save join command locally
+      local_action:
+        module: copy
+        content: "{{ join_command.stdout }}"
+        dest: "{{ playbook_dir }}/join-command.sh"
+        mode: '0600'
+      become: no
+
+- name: Join worker nodes
+  hosts: worker
+  become: yes
+  tasks:
+    - name: Read join command
+      local_action:
+        module: slurp
+        src: "{{ playbook_dir }}/join-command.sh"
+      become: no
+      register: join_command_file
+
+    - name: Join Kubernetes cluster
+      shell: "{{ join_command_file.content | b64decode }}"
+      register: join_result
+      retries: 3
+      delay: 10
+      until: join_result is not failed
+
+    - name: Verify node status (from master)
+      delegate_to: "{{ groups['master'][0] }}"
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl get nodes
+      register: node_status
+      until: node_status is not failed
+      retries: 10
+      delay: 30
+
+    - name: Show node status
+      debug:
+        msg: "{{ node_status.stdout_lines }}"
